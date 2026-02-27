@@ -3,13 +3,15 @@
 //! A CLI tool that reads a byte range from a file inside a RAR archive and
 //! prints it as a hex dump to stdout.
 //!
+//! Supports both local files and HTTP/HTTPS URLs.
+//!
 //! ## Usage
 //!
 //! ```text
 //! rar-hex [OPTIONS] <ARCHIVE> <SELECTOR> <START> <LENGTH>
 //!
 //! Arguments:
-//!   <ARCHIVE>   Path to the RAR archive file
+//!   <ARCHIVE>   Path to the RAR archive file, OR an http(s):// URL
 //!   <SELECTOR>  File selector: a zero-based integer index OR a file path
 //!               (e.g. "0", "1", "readme.txt", "subdir/file.bin")
 //!   <START>     Byte offset to start reading from (decimal or 0x-prefixed hex)
@@ -22,8 +24,11 @@
 //!
 //! ## Examples
 //!
-//! List entries:
+//! List entries in a local archive:
 //!   rar-hex --list archive.rar
+//!
+//! List entries in a remote archive:
+//!   rar-hex --list https://example.com/archive.rar
 //!
 //! Read first 64 bytes of entry 0:
 //!   rar-hex archive.rar 0 0 64
@@ -33,13 +38,15 @@
 //!
 //! Read from an encrypted archive:
 //!   rar-hex -p secret archive.rar 0 0 64
+//!
+//! Read from a remote encrypted archive:
+//!   rar-hex -p 1 https://example.com/encrypted.rar 0 0 64
 //! ```
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process;
 
-use rar_access::{Archive, EntrySelector, RarError, RarVersion};
+use rar_access::{Archive, HttpFileMedia, RarError};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -53,7 +60,6 @@ fn main() {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    // Parse arguments manually (no external crates).
     let mut password: Option<String> = None;
     let mut list_mode = false;
     let mut positional: Vec<&str> = Vec::new();
@@ -88,51 +94,37 @@ fn run(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    // Require at least the archive path.
     if positional.is_empty() {
         print_help();
         return Ok(());
     }
 
-    let archive_path = positional[0];
+    let archive_src = positional[0];
 
-    // Open the archive.
-    let file = File::open(archive_path)
-        .map_err(|e| format!("cannot open '{}': {}", archive_path, e))?;
+    // Open the archive — local file or HTTP URL.
+    let archive = open_archive(archive_src, password.as_deref())?;
 
-    let mut archive = Archive::open(file)
-        .map_err(|e| format!("cannot parse archive '{}': {}", archive_path, e))?;
-
-    if let Some(pw) = &password {
-        archive.set_password(pw.as_bytes().to_vec());
-    }
-
-    // --list mode: print all entries and exit.
+    // --list mode.
     if list_mode {
-        let version = match archive.version() {
-            RarVersion::V4 => "RAR v4",
-            RarVersion::V5 => "RAR v5",
-        };
-        println!("Archive: {} ({})", archive_path, version);
-        println!("Multi-volume: {}", archive.is_multi_volume());
+        println!("Archive: {}", archive_src);
         println!();
-        println!("{:>4}  {:>12}  {:>12}  {:>9}  {:>9}  {}", 
-            "IDX", "SIZE", "PACKED", "ENC", "SPLIT", "PATH");
+        println!("{:>4}  {:>12}  {:>9}  {:>10}  {:>9}  {}",
+            "IDX", "SIZE", "ENC", "COMPRESSED", "SPLIT", "PATH");
         println!("{}", "-".repeat(72));
         for entry in archive.entries() {
-            println!("{:>4}  {:>12}  {:>12}  {:>9}  {:>9}  {}",
+            println!("{:>4}  {:>12}  {:>9}  {:>10}  {:>9}  {}",
                 entry.index(),
                 entry.size(),
-                entry.compressed_size(),
                 if entry.is_encrypted() { "yes" } else { "no" },
+                if entry.is_compressed() { "yes" } else { "no" },
                 if entry.is_split() { "yes" } else { "no" },
-                entry.path(),
+                entry.name(),
             );
         }
         return Ok(());
     }
 
-    // Require selector, start, length for hex dump mode.
+    // Hex dump mode.
     if positional.len() < 4 {
         return Err(format!(
             "usage: rar-hex [OPTIONS] <ARCHIVE> <SELECTOR> <START> <LENGTH>\n\
@@ -154,10 +146,10 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     // Build the entry selector.
-    let selector: EntrySelector = if let Ok(idx) = selector_str.parse::<usize>() {
-        EntrySelector::ByIndex(idx)
+    let selector = if let Ok(idx) = selector_str.parse::<usize>() {
+        rar_access::EntrySelector::ByIndex(idx)
     } else {
-        EntrySelector::ByPath(selector_str)
+        rar_access::EntrySelector::ByPath(selector_str)
     };
 
     // Open the entry reader.
@@ -170,9 +162,6 @@ fn run(args: &[String]) -> Result<(), String> {
             "archive is encrypted; use -p <PASSWORD> to provide a password".into()
         }
         RarError::IncorrectPassword => "incorrect password".into(),
-        RarError::UnsupportedCompression(m) => {
-            format!("unsupported compression method {:#04x}; only STORE is supported", m)
-        }
         other => format!("{}", other),
     })?;
 
@@ -190,15 +179,31 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     let buf = &buf[..n];
-
-    // Print hex dump.
     print_hex_dump(buf, start);
 
     Ok(())
 }
 
+/// Open an archive from a local path or HTTP URL.
+fn open_archive(src: &str, password: Option<&str>) -> Result<Archive, String> {
+    let mut archive = if src.starts_with("http://") || src.starts_with("https://") {
+        let media = HttpFileMedia::new(src)
+            .map_err(|e| format!("cannot open URL '{}': {}", src, e))?;
+        Archive::open_media(media)
+            .map_err(|e| format!("cannot parse archive '{}': {}", src, e))?
+    } else {
+        Archive::open_path(src)
+            .map_err(|e| format!("cannot open '{}': {}", src, e))?
+    };
+
+    if let Some(pw) = password {
+        archive.set_password(pw);
+    }
+
+    Ok(archive)
+}
+
 /// Read up to `buf.len()` bytes, returning the number of bytes actually read.
-/// Unlike `read_exact`, this does not error on EOF.
 fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
@@ -225,10 +230,8 @@ fn print_hex_dump(data: &[u8], base_offset: u64) {
     for (chunk_idx, chunk) in data.chunks(16).enumerate() {
         let offset = base_offset + (chunk_idx * 16) as u64;
 
-        // Offset column.
         write!(out, "{:08x}  ", offset).unwrap();
 
-        // Hex bytes (two groups of 8).
         for (i, &byte) in chunk.iter().enumerate() {
             if i == 8 {
                 write!(out, " ").unwrap();
@@ -236,7 +239,6 @@ fn print_hex_dump(data: &[u8], base_offset: u64) {
             write!(out, "{:02x} ", byte).unwrap();
         }
 
-        // Padding if the last chunk is shorter than 16 bytes.
         let padding = 16 - chunk.len();
         for i in 0..padding {
             if chunk.len() + i == 8 {
@@ -245,7 +247,6 @@ fn print_hex_dump(data: &[u8], base_offset: u64) {
             write!(out, "   ").unwrap();
         }
 
-        // ASCII column.
         write!(out, " |").unwrap();
         for &byte in chunk {
             let c = if byte.is_ascii_graphic() || byte == b' ' {
@@ -276,7 +277,7 @@ fn print_help() {
     println!("  rar-hex --list [OPTIONS] <ARCHIVE>");
     println!();
     println!("ARGUMENTS:");
-    println!("  <ARCHIVE>   Path to the RAR archive (.rar file)");
+    println!("  <ARCHIVE>   Path to the RAR archive (.rar file) OR an http(s):// URL");
     println!("  <SELECTOR>  Entry selector:");
     println!("                - Integer index (0-based): e.g. 0, 1, 2");
     println!("                - File path: e.g. \"readme.txt\", \"subdir/file.bin\"");
@@ -290,8 +291,11 @@ fn print_help() {
     println!("  -h, --help           Print this help message");
     println!();
     println!("EXAMPLES:");
-    println!("  # List all entries in an archive");
+    println!("  # List all entries in a local archive");
     println!("  rar-hex --list archive.rar");
+    println!();
+    println!("  # List all entries in a remote archive");
+    println!("  rar-hex --list https://example.com/archive.rar");
     println!();
     println!("  # Read first 64 bytes of entry 0");
     println!("  rar-hex archive.rar 0 0 64");
@@ -302,6 +306,6 @@ fn print_help() {
     println!("  # Read from an encrypted archive with password '1'");
     println!("  rar-hex -p 1 encrypted.rar 0 0 64");
     println!();
-    println!("  # Read last 16 bytes (use --list to find the file size first)");
-    println!("  rar-hex archive.rar 0 3168633 16");
+    println!("  # Read from a remote encrypted archive");
+    println!("  rar-hex -p secret https://example.com/encrypted.rar 0 0 64");
 }

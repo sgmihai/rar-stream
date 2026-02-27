@@ -14,27 +14,9 @@ pub enum RarError {
     #[error("invalid archive signature")]
     InvalidSignature,
 
-    /// The archive format version is not supported.
-    #[error("unsupported archive version: {0}")]
-    UnsupportedVersion(u8),
-
-    /// A header checksum mismatch was detected.
-    #[error("header checksum mismatch (expected {expected:#010x}, got {actual:#010x})")]
-    HeaderChecksumMismatch {
-        /// The expected CRC32 value from the header.
-        expected: u32,
-        /// The actual computed CRC32 value.
-        actual: u32,
-    },
-
-    /// A file data checksum mismatch was detected.
-    #[error("file data checksum mismatch (expected {expected:#010x}, got {actual:#010x})")]
-    DataChecksumMismatch {
-        /// The expected CRC32 value from the header.
-        expected: u32,
-        /// The actual computed CRC32 value.
-        actual: u32,
-    },
+    /// The archive is corrupt or has an invalid header.
+    #[error("invalid or corrupt archive header: {0}")]
+    InvalidHeader(String),
 
     /// The requested file was not found in the archive.
     #[error("file not found in archive: {0}")]
@@ -58,29 +40,43 @@ pub enum RarError {
     IncorrectPassword,
 
     /// The compression method is not supported.
-    #[error("unsupported compression method: {0:#04x}")]
-    UnsupportedCompression(u8),
+    #[error("unsupported compression method: {0}")]
+    UnsupportedCompression(String),
 
-    /// A multi-volume archive part is missing.
-    #[error("missing archive volume: {0}")]
-    MissingVolume(String),
-
-    /// The archive is corrupt or truncated.
-    #[error("archive is corrupt or truncated: {0}")]
-    Corrupt(String),
-
-    /// A seek operation is not supported for this entry.
-    #[error("seek not supported: {0}")]
-    SeekNotSupported(String),
+    /// An HTTP error occurred while fetching archive data.
+    #[error("HTTP error: {0}")]
+    Http(String),
 
     /// An invalid seek position was requested.
-    #[error("invalid seek position")]
-    InvalidSeekPosition,
+    #[error("invalid seek position: offset {offset} is out of range [0, {length})")]
+    InvalidSeekPosition {
+        /// The requested offset.
+        offset: u64,
+        /// The length of the entry.
+        length: u64,
+    },
 
     /// The archive uses an unsupported feature.
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
+
+    /// An error from the underlying rar-stream library.
+    #[error("rar-stream error: {0}")]
+    Backend(String),
 }
 
 /// A specialized `Result` type for RAR operations.
 pub type Result<T> = std::result::Result<T, RarError>;
+
+impl From<rar_stream::RarError> for RarError {
+    fn from(e: rar_stream::RarError) -> Self {
+        match e {
+            rar_stream::RarError::InvalidSignature => RarError::InvalidSignature,
+            rar_stream::RarError::InvalidHeader => RarError::InvalidHeader("malformed header".into()),
+            rar_stream::RarError::PasswordRequired => RarError::PasswordRequired,
+            rar_stream::RarError::DecryptionFailed(_) => RarError::IncorrectPassword,
+            rar_stream::RarError::Io(io_err) => RarError::Io(io_err),
+            other => RarError::Backend(other.to_string()),
+        }
+    }
+}

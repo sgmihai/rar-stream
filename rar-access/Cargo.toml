@@ -1,33 +1,25 @@
 [package]
 name = "rar-access"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Streaming and seekable access to files inside RAR archives (v4 and v5)"
+description = "Streaming and seekable access to files inside RAR archives (v4 and v5), with HTTP source support"
 license = "MIT OR Apache-2.0"
-keywords = ["rar", "archive", "streaming", "seek", "decompress"]
-categories = ["compression", "filesystem"]
+keywords = ["rar", "archive", "streaming", "seek", "http"]
+categories = ["compression", "filesystem", "web-programming"]
 
 [dependencies]
-# CRC32 for checksum verification
-crc32fast = "1"
-# BLAKE2 for RAR5 checksums
-blake2 = "0.10"
-# AES for encrypted archives
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-# SHA-1 for RAR4 password key derivation
-sha1 = "0.10"
-# SHA-256 for RAR5 password key derivation
-sha2 = "0.10"
-# PBKDF2 for RAR5 key derivation
-pbkdf2 = { version = "0.12", default-features = false }
-hmac = "0.12"
-# Byte order reading utilities
-byteorder = "1"
-# Thiserror for ergonomic error types
+# RAR parsing and decompression backend
+rar-stream = { git = "https://github.com/doom-fish/rar-stream", features = ["async", "crypto"] }
+
+# Async runtime (needed to bridge rar-stream's async API to sync Read+Seek)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "fs", "io-util", "sync", "macros"] }
+
+# HTTP range requests for remote archives
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# Error handling
 thiserror = "1"
-# Bitflags for flag fields
-bitflags = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

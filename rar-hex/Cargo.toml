@@ -1,0 +1,12 @@
+[package]
+name = "rar-hex"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool to read byte ranges from files inside RAR archives and display as hex"
+
+[[bin]]
+name = "rar-hex"
+path = "src/main.rs"
+
+[dependencies]
+rar-access = { path = "../rar-access" }

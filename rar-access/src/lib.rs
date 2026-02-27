@@ -668,3 +668,339 @@ mod tests {
         assert_eq!(&buf, b"56789");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Integration tests using real RAR test files
+// ---------------------------------------------------------------------------
+
+/// Path to the test fixtures directory (relative to the crate root).
+#[cfg(test)]
+const TEST_FILES_DIR: &str = "../rar_test_files";
+
+#[cfg(test)]
+mod integration_tests {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::path::Path;
+
+    use super::*;
+
+    /// Return the path to a test fixture file.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(TEST_FILES_DIR).join(name)
+    }
+
+    /// Return `true` if the test fixture files are available.
+    fn fixtures_available() -> bool {
+        fixture("store_nopass.rar").exists()
+    }
+
+    // -----------------------------------------------------------------------
+    // store_nopass.rar — RAR v5, single file, no password
+    // Contains: store_pass_1.rar (3,168,991 bytes)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_real_store_nopass_open() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        assert_eq!(archive.version(), RarVersion::V5);
+        assert_eq!(archive.len(), 1);
+        assert!(!archive.is_empty());
+        assert!(!archive.is_multi_volume());
+    }
+
+    #[test]
+    fn test_real_store_nopass_entry_metadata() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.path(), "store_pass_1.rar");
+        assert_eq!(entry.size(), 3168991);
+        assert!(!entry.is_encrypted());
+        assert!(!entry.is_split());
+        assert_eq!(entry.compression_method(), "store");
+    }
+
+    #[test]
+    fn test_real_store_nopass_read_content() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // The content is another RAR file, so it should start with the RAR v5 signature.
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00],
+            "inner file should be a RAR v5 archive");
+    }
+
+    #[test]
+    fn test_real_store_nopass_seek() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // Seek to position 4 and read 4 bytes (should be "!..." part of RAR sig).
+        reader.seek(SeekFrom::Start(4)).unwrap();
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, &[0x1A, 0x07, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn test_real_store_nopass_seek_from_end() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // Read the last 8 bytes.
+        reader.seek(SeekFrom::End(-8)).unwrap();
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).unwrap();
+        // Just verify we can read without error.
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn test_real_store_nopass_read_by_path() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let mut reader = archive.entry_reader("store_pass_1.rar").unwrap();
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn test_real_store_nopass_file_not_found() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let result = archive.entry_reader("nonexistent.txt");
+        assert!(matches!(result, Err(RarError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn test_real_store_nopass_password_not_required() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_nopass.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        // Should work without a password.
+        let result = archive.entry_reader(0usize);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // store_pass_1.rar — RAR v5, single file, password="1"
+    // Contains: The Great Ideas of Philosophy, 2nd Edition.pdf (3,168,649 bytes)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_real_store_pass_open() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        assert_eq!(archive.version(), RarVersion::V5);
+        assert_eq!(archive.len(), 1);
+        assert!(!archive.is_multi_volume());
+    }
+
+    #[test]
+    fn test_real_store_pass_entry_metadata() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.path(), "The Great Ideas of Philosophy, 2nd Edition.pdf");
+        assert_eq!(entry.size(), 3168649);
+        assert!(entry.is_encrypted());
+        assert!(!entry.is_split());
+    }
+
+    #[test]
+    fn test_real_store_pass_requires_password() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let result = archive.entry_reader(0usize);
+        assert!(matches!(result, Err(RarError::PasswordRequired)));
+    }
+
+    #[test]
+    fn test_real_store_pass_correct_password() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        archive.set_password("1");
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // The PDF should start with %PDF
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"%PDF", "decrypted content should be a PDF");
+    }
+
+    #[test]
+    fn test_real_store_pass_read_full_size() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        archive.set_password("1");
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // Read the entire file and verify size.
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 3168649);
+        assert_eq!(&buf[..4], b"%PDF");
+    }
+
+    #[test]
+    fn test_real_store_pass_seek_and_read() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        archive.set_password("1");
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // Seek to position 1024 and read 8 bytes.
+        reader.seek(SeekFrom::Start(1024)).unwrap();
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).unwrap();
+        // Just verify we can seek and read without error.
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn test_real_store_pass_seek_from_end() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_pass_1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        archive.set_password("1");
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // Seek to 4 bytes before the end and read.
+        reader.seek(SeekFrom::End(-4)).unwrap();
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        // PDF files end with %%EOF (or similar).
+        assert_eq!(buf.len(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // store_multi.part1.rar — RAR v5, multi-volume (4 parts), no password
+    // Contains: The Great Ideas of Philosophy, 2nd Edition.pdf (3,168,649 bytes, split)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_real_store_multi_open() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi.part1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        assert_eq!(archive.version(), RarVersion::V5);
+        assert_eq!(archive.len(), 1);
+        assert!(archive.is_multi_volume());
+    }
+
+    #[test]
+    fn test_real_store_multi_entry_metadata() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi.part1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.path(), "The Great Ideas of Philosophy, 2nd Edition.pdf");
+        assert_eq!(entry.size(), 3168649);
+        assert!(!entry.is_encrypted());
+        assert!(entry.is_split());
+    }
+
+    #[test]
+    fn test_real_store_multi_read_first_part() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi.part1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let mut reader = archive.entry_reader(0usize).unwrap();
+
+        // The first part should start with %PDF.
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"%PDF", "first part should start with PDF header");
+    }
+
+    #[test]
+    fn test_real_store_multi_resolve_volumes() {
+        if !fixtures_available() { return; }
+        use crate::multi_volume::resolve_volumes;
+        let first = fixture("store_multi.part1.rar");
+        let volumes = resolve_volumes(&first).unwrap();
+        assert_eq!(volumes.len(), 4, "should find all 4 volumes");
+        assert!(volumes[0].ends_with("store_multi.part1.rar"));
+        assert!(volumes[1].ends_with("store_multi.part2.rar"));
+        assert!(volumes[2].ends_with("store_multi.part3.rar"));
+        assert!(volumes[3].ends_with("store_multi.part4.rar"));
+    }
+
+    // -----------------------------------------------------------------------
+    // store_multi_pass1.part1.rar — RAR v5, multi-volume (4 parts), password="1"
+    // Contains: The Great Ideas of Philosophy, 2nd Edition.pdf (3,168,649 bytes, split+encrypted)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_real_store_multi_pass_open() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi_pass1.part1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        assert_eq!(archive.version(), RarVersion::V5);
+        assert_eq!(archive.len(), 1);
+        assert!(archive.is_multi_volume());
+    }
+
+    #[test]
+    fn test_real_store_multi_pass_entry_metadata() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi_pass1.part1.rar")).unwrap();
+        let archive = Archive::open(f).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.path(), "The Great Ideas of Philosophy, 2nd Edition.pdf");
+        assert_eq!(entry.size(), 3168649);
+        assert!(entry.is_encrypted());
+        assert!(entry.is_split());
+    }
+
+    #[test]
+    fn test_real_store_multi_pass_requires_password() {
+        if !fixtures_available() { return; }
+        let f = File::open(fixture("store_multi_pass1.part1.rar")).unwrap();
+        let mut archive = Archive::open(f).unwrap();
+        let result = archive.entry_reader(0usize);
+        assert!(matches!(result, Err(RarError::PasswordRequired)));
+    }
+
+    #[test]
+    fn test_real_store_multi_pass_resolve_volumes() {
+        if !fixtures_available() { return; }
+        use crate::multi_volume::resolve_volumes;
+        let first = fixture("store_multi_pass1.part1.rar");
+        let volumes = resolve_volumes(&first).unwrap();
+        assert_eq!(volumes.len(), 4, "should find all 4 volumes");
+        assert!(volumes[0].ends_with("store_multi_pass1.part1.rar"));
+        assert!(volumes[1].ends_with("store_multi_pass1.part2.rar"));
+        assert!(volumes[2].ends_with("store_multi_pass1.part3.rar"));
+        assert!(volumes[3].ends_with("store_multi_pass1.part4.rar"));
+    }
+}

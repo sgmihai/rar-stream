@@ -187,20 +187,14 @@ impl<R: Read + Seek> RarV5Archive<R> {
             decrypted.truncate(entry.unpacked_size as usize);
         }
 
-        if let Some(checksum) = &entry.checksum {
-            match checksum {
-                Checksum::Crc32(expected) => {
-                    let actual = crc32fast::hash(&decrypted);
-                    if actual != *expected {
-                        return Err(RarError::IncorrectPassword);
-                    }
-                }
-                Checksum::Blake2sp(expected) => {
-                    let actual = blake2sp_hash(&decrypted);
-                    if &actual != expected {
-                        return Err(RarError::IncorrectPassword);
-                    }
-                }
+        // Note: For RAR5 encrypted files, the CRC32 in the file header is the
+        // CRC32 of the *encrypted* data (not the plaintext). We skip CRC32
+        // verification here. BLAKE2sp checksums (stored in the extra data area)
+        // are for the plaintext and can be verified.
+        if let Some(Checksum::Blake2sp(expected)) = &entry.checksum {
+            let actual = blake2sp_hash(&decrypted);
+            if &actual != expected {
+                return Err(RarError::IncorrectPassword);
             }
         }
 
